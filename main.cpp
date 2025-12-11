@@ -19,6 +19,20 @@ class ReactorEventLoop{
             throw std::runtime_error("WSAStartup failed");
           }
        }
+       ~ReactorEventLoop()
+       {
+          stop();
+          // 清理所有事件和socket
+          for(auto& event;events_)
+          {
+            WSA
+          }
+       }
+       //添加 socket 到事件循环
+       void addSocket(SOCKET sock,EventCallback readCallback=nullptr,
+      ){
+         std::lock_guard
+       }
 };
 int main(int, char**){
     std::cout << "Hello, from CReactorEventLoop!\n";
