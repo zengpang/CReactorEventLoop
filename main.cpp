@@ -95,7 +95,24 @@ public:
             return true;
          }
        }
-     ))
+     ));
+   };
+
+   //设置默认回调函数
+   void setDefaultReadCallback(EventCallback callback){defaultReadCallback_ =callback;}
+   void setDefaultWriteCallback(EventCallback callback){defaultWriteCallback_=callback;}
+   void setDefaultCloseCallback(EventCallback callback){defaultCloseCallback_=callback;}
+
+   // 启动事件循环
+   void run()
+   {
+      if(running_) return ;
+      running_ = true;
+      std::cout<<"Reactor event loop started"<<std::endl;
+      while(running_)
+      {
+         if(events.e)
+      }
    }
    void stop()
    {
@@ -146,12 +163,16 @@ class EchoServer{
      EchoServer():serverSocket_(INVALID_ATOM){};
      ~EchoServer()
      {
-
+        stop();
      }
      void start(int port=8080)
      {
        //创建服务器socket
-       serverS
+       server
+     }
+     void stop()
+     {
+       
      }
 }
 int main(int, char **)
