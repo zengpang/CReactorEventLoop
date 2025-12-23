@@ -106,30 +106,33 @@ public:
    void run()
    {
       if (running_)
-         return;
-      running_ = true;
-      std::cout << "Reactor event loop started" << std::endl;
+         return;                                              // 如果已经在运行，直接返回
+      running_ = true;                                        // 设置运行状态
+      std::cout << "Reactor event loop started" << std::endl; // 输出自动信息
       while (running_)
       {
-         if (events_.empty())
+         if (events_.empty()) // 如果没有注册的事件
          {
             Sleep(100); // 没有事件时短暂休眠
-            continue;
+            continue;   // 继续循环
          }
+
+         // 等待多个事件中的任何一个发生，超时时间1秒
          DWORD result = WSAWaitForMultipleEvents(
-             static_cast<DWORD>(events_.size()),
-             events_.data(),
-             FALSE,
-             1000, // 1秒超时
-             FALSE);
-         if (result == WSA_WAIT_FAILED)
+             static_cast<DWORD>(events_.size()), // 事件数量
+             events_.data(),                     // 事件数组
+             FALSE,                              // 等待任意一个事件，而不是所有事件
+             1000,                               // 1秒超时
+             FALSE                               // 非可警告等待
+         );
+         if (result == WSA_WAIT_FAILED) // 等待失败
          {
             std::cerr << "WSAWaitForMultipleEvents failed:" << WSAGetLastError() << std::endl;
-            continue;
+            continue; // 继续循环
          }
-         if (result == WSA_WAIT_TIMEOUT)
+         if (result == WSA_WAIT_TIMEOUT) // 超时
          {
-            continue;
+            continue; // 超时，继续循环
          }
 
          DWORD eventIndex = result * WSA_WAIT_EVENT_0;
@@ -138,7 +141,7 @@ public:
             continue;
          }
 
-         WSAEVENT triggeredEvent = events_[eventIndex];
+         WSAEVENT triggeredEvent = events_[eventIndex]; // 计算触发事件的索引
          SocketInfo *info = nullptr;
 
          // 找到对应的事件信息
@@ -194,36 +197,36 @@ public:
    }
 
 private:
-   struct SocketInfo
+   struct SocketInfo // Socket信息结构体
    {
-      SOCKET socket;
-      WSAEVENT event;
-      EventCallback readCallback;
-      EventCallback writeCallback;
-      EventCallback closeCallback;
+      SOCKET socket;               // socket句柄
+      WSAEVENT event;              // 关联的事件对象
+      EventCallback readCallback;  // 读回调函数
+      EventCallback writeCallback; // 写回调函数
+      EventCallback closeCallback; // 关闭回调函数
    };
-   std::vector<SocketInfo> socketInfos_;
-   std::vector<WSAEVENT> events_;
-   std::vector<SOCKET> sockets_;
-   std::atomic<bool> running_;
-   std::mutex mutex_;
+   std::vector<SocketInfo> socketInfos_; // 存储所有socket信息
+   std::vector<WSAEVENT> events_;        // 存储所有事件对象
+   std::vector<SOCKET> sockets_;         // 存储所有socket
+   std::atomic<bool> running_;           // 原子运行状态标志
+   std::mutex mutex_;                    // 互斥锁，用于线程同步
 
-   EventCallback defaultReadCallback_;
-   EventCallback defaultWriteCallback_;
-   EventCallback defaultCloseCallback_;
+   EventCallback defaultReadCallback_;  // 默认读回调
+   EventCallback defaultWriteCallback_; // 默认写回调
+   EventCallback defaultCloseCallback_; // 默认关闭回调
 
    void handleEvent(SocketInfo *info, int eventType, int errorCode)
    {
-      if (errorCode != 0)
+      if (errorCode != 0) // 如果有错误
       {
          std::cerr << "Network event error: " << errorCode << std::endl;
-         if (eventType == FD_CLOSE || errorCode != 0)
+         if (eventType == FD_CLOSE || errorCode != 0) // 如果是关闭事件或有错误
          {
-            throw std::runtime_error("WSACreateEvent failed");
+            removeSocket(info->socket);
          }
          return;
       }
-      try
+      try //异常处理
       {
          switch (eventType)
          {
