@@ -1,18 +1,19 @@
+#include <winsock2.h>
+#include <windows.h>
 #include <iostream>
-#include <WinSock2.h> // Windows Socket API 2.0 头文件，提供网络变成接口
-#include <windows.h>  // Windows API 主头文件，提供系统功能
-#include <iostream>
-#include <vector>     // C++ 动态数组容器
-#include <thread>     // C++ 线程支持
-#include <atomic>     // C++ 原子操作支持
-#include <functional> // C++ 函数对象支持
-#include <memory>     // C++ 智能指针支持
+#include <vector>
+#include <thread>
+#include <atomic>
+#include <functional>
+#include <memory>
 #include <mutex>
-#pragma comment(lib, "ws2_32.lib") // 编译器指令，自动链接 ws2_32.lib 库
+#pragma comment(lib, "ws2_32.lib")
+
 class ReactorEventLoop
 {
 public:
    using EventCallback = std::function<void(SOCKET, int)>;
+
    ReactorEventLoop() : running_(false)
    {
       // 初始化 Winsock
@@ -22,6 +23,7 @@ public:
          throw std::runtime_error("WSAStartup failed");
       }
    }
+
    ~ReactorEventLoop()
    {
       stop();
@@ -36,13 +38,14 @@ public:
       }
       WSACleanup();
    }
+
    // 添加 socket 到事件循环
-   void addSocket(SOCKET sock,
-                  EventCallback readCallback = nullptr,
+   void addSocket(SOCKET sock, EventCallback readCallback = nullptr,
                   EventCallback writeCallback = nullptr,
                   EventCallback closeCallback = nullptr)
    {
       std::lock_guard<std::mutex> lock(mutex_);
+
       WSAEVENT event = WSACreateEvent();
       if (event == WSA_INVALID_EVENT)
       {
@@ -50,11 +53,12 @@ public:
       }
 
       // 注册事件
-      if (WSAEventSelect(sock, event, FD_READ | FD_WRITE | FD_ACCEPT) == SOCKET_ERROR)
+      if (WSAEventSelect(sock, event, FD_READ | FD_WRITE | FD_CLOSE | FD_ACCEPT) == SOCKET_ERROR)
       {
          WSACloseEvent(event);
-         throw std::runtime_error("WSACreateEvent failed");
+         throw std::runtime_error("WSAEventSelect failed");
       }
+
       SocketInfo info;
       info.socket = sock;
       info.event = event;
@@ -70,32 +74,39 @@ public:
    // 移除 socket
    void removeSocket(SOCKET sock)
    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      for (auto it = socketInfos_.begin(); it != socketInfos_.end(); ++it)
+      std::lock_guard<std::mutex> lock(mutex_); // 1.获取互斥锁,确保线程安全
+      // 2. 使用 lambda 表达式查找匹配的socket
+      auto it = std::find_if(socketInfos_.begin(), socketInfos_.end(), [sock](const SocketInfo &info)
+                             { return info.socket == sock; });
+
+      if (it != socketInfos_.end()) // 3.检查是否找到了要移除的socket
       {
-         if (it->socket == sock)
+         // 4.清理windows事件对象资源
+         WSACloseEvent(it->event);
+
+         // 5.关闭socket连接
+         closesocket(it->socket);
+
+         // 6.从主容器中移除该socket信息
+         socketInfos_.erase(it);
+
+         // 7.清空辅助的事件容器
+         events_.clear();
+
+         // 8.清空辅助的socket容器
+         sockets_.clear();
+
+         // 9.重新构建辅助容器以保持数据一致性
+         for (const auto &info : socketInfos_)
          {
-            WSACloseEvent(it->event);
-            closesocket(sock);
-            socketInfos_.erase(it);
-            break;
+            // 10.将每个socket的事件添加到事件容器
+            events_.push_back(info.event);
+
+            // 11.将每个socket添加到socket容器
+            sockets_.push_back(info.socket);
          }
       }
-
-      // 同时从events_和sockets_中移除
-      events_.erase(std::remove(events_.begin(), events_.end(),
-                                [&](WSAEVENT event)
-                                {
-                                   for (const auto &info : socketInfos_)
-                                   {
-                                      if (info.event == event)
-                                      {
-                                         return false;
-                                      }
-                                      return true;
-                                   }
-                                }));
-   };
+   }
 
    // 设置默认回调函数
    void setDefaultReadCallback(EventCallback callback) { defaultReadCallback_ = callback; }
@@ -106,42 +117,44 @@ public:
    void run()
    {
       if (running_)
-         return;                                              // 如果已经在运行，直接返回
-      running_ = true;                                        // 设置运行状态
-      std::cout << "Reactor event loop started" << std::endl; // 输出自动信息
+         return;
+
+      running_ = true;
+      std::cout << "Reactor event loop started" << std::endl;
+
       while (running_)
       {
-         if (events_.empty()) // 如果没有注册的事件
+         if (events_.empty())
          {
             Sleep(100); // 没有事件时短暂休眠
-            continue;   // 继续循环
+            continue;
          }
 
-         // 等待多个事件中的任何一个发生，超时时间1秒
          DWORD result = WSAWaitForMultipleEvents(
-             static_cast<DWORD>(events_.size()), // 事件数量
-             events_.data(),                     // 事件数组
-             FALSE,                              // 等待任意一个事件，而不是所有事件
-             1000,                               // 1秒超时
-             FALSE                               // 非可警告等待
-         );
-         if (result == WSA_WAIT_FAILED) // 等待失败
+             static_cast<DWORD>(events_.size()),
+             events_.data(),
+             FALSE,
+             1000, // 1秒超时
+             FALSE);
+
+         if (result == WSA_WAIT_FAILED)
          {
-            std::cerr << "WSAWaitForMultipleEvents failed:" << WSAGetLastError() << std::endl;
-            continue; // 继续循环
+            std::cerr << "WSAWaitForMultipleEvents failed: " << WSAGetLastError() << std::endl;
+            continue;
          }
-         if (result == WSA_WAIT_TIMEOUT) // 超时
+
+         if (result == WSA_WAIT_TIMEOUT)
          {
             continue; // 超时，继续循环
          }
 
-         DWORD eventIndex = result * WSA_WAIT_EVENT_0;
-         if (eventIndex == events_.size())
+         DWORD eventIndex = result - WSA_WAIT_EVENT_0;
+         if (eventIndex >= events_.size())
          {
             continue;
          }
 
-         WSAEVENT triggeredEvent = events_[eventIndex]; // 计算触发事件的索引
+         WSAEVENT triggeredEvent = events_[eventIndex];
          SocketInfo *info = nullptr;
 
          // 找到对应的事件信息
@@ -163,7 +176,7 @@ public:
          WSANETWORKEVENTS netEvents;
          if (WSAEnumNetworkEvents(info->socket, triggeredEvent, &netEvents) == SOCKET_ERROR)
          {
-            std::cerr << "WSAEnumNetWorkEvents failed:" << WSAGetLastError() << std::endl;
+            std::cerr << "WSAEnumNetworkEvents failed: " << WSAGetLastError() << std::endl;
             continue;
          }
 
@@ -185,48 +198,53 @@ public:
             handleEvent(info, FD_ACCEPT, netEvents.iErrorCode[FD_ACCEPT_BIT]);
          }
       }
+
       std::cout << "Reactor event loop stopped" << std::endl;
    }
+
    void stop()
    {
       running_ = false;
    }
+
    bool isRunning() const
    {
       return running_;
    }
 
 private:
-   struct SocketInfo // Socket信息结构体
+   struct SocketInfo
    {
-      SOCKET socket;               // socket句柄
-      WSAEVENT event;              // 关联的事件对象
-      EventCallback readCallback;  // 读回调函数
-      EventCallback writeCallback; // 写回调函数
-      EventCallback closeCallback; // 关闭回调函数
+      SOCKET socket;
+      WSAEVENT event;
+      EventCallback readCallback;
+      EventCallback writeCallback;
+      EventCallback closeCallback;
    };
-   std::vector<SocketInfo> socketInfos_; // 存储所有socket信息
-   std::vector<WSAEVENT> events_;        // 存储所有事件对象
-   std::vector<SOCKET> sockets_;         // 存储所有socket
-   std::atomic<bool> running_;           // 原子运行状态标志
-   std::mutex mutex_;                    // 互斥锁，用于线程同步
 
-   EventCallback defaultReadCallback_;  // 默认读回调
-   EventCallback defaultWriteCallback_; // 默认写回调
-   EventCallback defaultCloseCallback_; // 默认关闭回调
+   std::vector<SocketInfo> socketInfos_;
+   std::vector<WSAEVENT> events_;
+   std::vector<SOCKET> sockets_;
+   std::atomic<bool> running_;
+   std::mutex mutex_;
+
+   EventCallback defaultReadCallback_;
+   EventCallback defaultWriteCallback_;
+   EventCallback defaultCloseCallback_;
 
    void handleEvent(SocketInfo *info, int eventType, int errorCode)
    {
-      if (errorCode != 0) // 如果有错误
+      if (errorCode != 0)
       {
          std::cerr << "Network event error: " << errorCode << std::endl;
-         if (eventType == FD_CLOSE || errorCode != 0) // 如果是关闭事件或有错误
+         if (eventType == FD_CLOSE || errorCode != 0)
          {
             removeSocket(info->socket);
          }
          return;
       }
-      try //异常处理
+
+      try
       {
          switch (eventType)
          {
@@ -238,7 +256,7 @@ private:
             }
             else if (defaultReadCallback_)
             {
-               defaultCloseCallback_(info->socket, errorCode);
+               defaultReadCallback_(info->socket, errorCode);
             }
             break;
          }
@@ -246,12 +264,12 @@ private:
          {
             if (info->writeCallback)
             {
-               info->readCallback(info->socket, errorCode);
+               info->writeCallback(info->socket, errorCode);
             }
             else if (defaultWriteCallback_)
             {
                defaultWriteCallback_(info->socket, errorCode);
-            };
+            }
             break;
          }
          case FD_CLOSE:
@@ -269,13 +287,13 @@ private:
          }
          case FD_ACCEPT:
          {
-            // 接收新连接
+            // 接受新连接
             SOCKET clientSocket = accept(info->socket, NULL, NULL);
             if (clientSocket != INVALID_SOCKET)
             {
-               std::cout << "New Connection accepted: " << clientSocket << std::endl;
+               std::cout << "New connection accepted: " << clientSocket << std::endl;
                addSocket(clientSocket);
-            };
+            }
             break;
          }
          }
@@ -284,17 +302,20 @@ private:
       {
          std::cerr << "Error in event handler: " << e.what() << std::endl;
       }
-   };
+   }
 };
-// 示例试用:简单的Echo 服务器
+
+// 示例使用：简单的 Echo 服务器
 class EchoServer
 {
 public:
-   EchoServer() : serverSocket_(INVALID_ATOM) {};
+   EchoServer() : serverSocket_(INVALID_SOCKET) {}
+
    ~EchoServer()
    {
       stop();
    }
+
    void start(int port = 8080)
    {
       // 创建服务器socket
@@ -306,7 +327,8 @@ public:
 
       // 设置地址重用
       int yes = 1;
-      if (setsockopt(serverSocket_, SOL_SOCKET, SO_REUSEADDR, (char *)&yes, sizeof(yes)) == SOCKET_ERROR)
+      if (setsockopt(serverSocket_, SOL_SOCKET, SO_REUSEADDR,
+                     (char *)&yes, sizeof(yes)) == SOCKET_ERROR)
       {
          closesocket(serverSocket_);
          throw std::runtime_error("setsockopt failed");
@@ -336,7 +358,17 @@ public:
       // 设置默认回调
       reactor_.setDefaultReadCallback([this](SOCKET sock, int error)
                                       { handleRead(sock, error); });
+      reactor_.setDefaultCloseCallback([this](SOCKET sock, int error)
+                                       { std::cout << "Connection closed: " << sock << std::endl; });
+
+      // 添加服务器socket到事件循环
+      reactor_.addSocket(serverSocket_);
+
+      // 启动事件循环
+      reactorThread_ = std::thread([this]()
+                                   { reactor_.run(); });
    }
+
    void stop()
    {
       reactor_.stop();
@@ -359,8 +391,10 @@ private:
          std::cerr << "Read error: " << error << std::endl;
          return;
       }
+
       char buffer[1024];
       int bytesReceived = recv(sock, buffer, sizeof(buffer) - 1, 0);
+
       if (bytesReceived > 0)
       {
          buffer[bytesReceived] = '\0';
@@ -371,26 +405,29 @@ private:
       }
       else if (bytesReceived == 0)
       {
-         std::cout << "Connection closed by client:" << sock << std::endl;
+         std::cout << "Connection closed by client: " << sock << std::endl;
       }
       else
       {
-         std::cerr << "recv failed:" << WSAGetLastError() << std::endl;
+         std::cerr << "recv failed: " << WSAGetLastError() << std::endl;
       }
    }
+
    SOCKET serverSocket_;
    ReactorEventLoop reactor_;
    std::thread reactorThread_;
 };
-int main(int, char **)
+
+int main()
 {
    try
    {
       std::cout << "Starting Reactor Event Loop Example..." << std::endl;
-      EchoServer server;
-      server.start(8080);
 
-      std::cout << "Server started.Press Enter to stop..." << std::endl;
+      EchoServer server;
+      server.start(8888);
+
+      std::cout << "Server started. Press Enter to stop..." << std::endl;
       std::cin.get();
 
       server.stop();
@@ -401,5 +438,6 @@ int main(int, char **)
       std::cerr << "Error: " << e.what() << std::endl;
       return 1;
    }
+
    return 0;
 }

@@ -2,4 +2,4 @@ cmake_minimum_required(VERSION 3.10.0)
 project(CReactorEventLoop VERSION 0.1.0 LANGUAGES C CXX)
 
 add_executable(CReactorEventLoop main.cpp)
-
+target_link_libraries(CReactorEventLoop ws2_32)
